@@ -11,6 +11,10 @@ Sequence:
 
 Publishing uses scripts/snapshot_publisher.py (shared with infrastructure).
 Stdlib only. No shell=True. Scheduling is intentionally not implemented.
+
+Deployment-specific addresses are not hardcoded: supply
+BESU_MONITOR_VALIDATORS_FILE / --validators-file and
+BESU_MONITOR_REMOTE_HOST / --remote-host (CLI wins over env).
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import collect_consensus as collector
 import snapshot_publisher as publisher
 
 
@@ -32,7 +37,6 @@ DEFAULT_COLLECTOR_IDENTITY = Path.home() / ".ssh" / "besu_monitor_collector"
 DEFAULT_PUBLISHER_IDENTITY = publisher.DEFAULT_PUBLISHER_IDENTITY
 
 DEFAULT_REMOTE_USER = publisher.DEFAULT_REMOTE_USER
-DEFAULT_REMOTE_HOST = publisher.DEFAULT_REMOTE_HOST
 DEFAULT_REMOTE_DIR = publisher.DEFAULT_REMOTE_DIR
 DEFAULT_FINAL_NAME = "consensus_snapshot.json"
 
@@ -50,6 +54,7 @@ ssh_base_argv = publisher.ssh_base_argv
 scp_argv = publisher.scp_argv
 default_runner = publisher.default_runner
 ensure_identity_exists = publisher.ensure_identity_exists
+resolve_remote_host = publisher.resolve_remote_host
 
 
 class PipelineError(Exception):
@@ -63,9 +68,10 @@ class PipelineConfig:
     collector_identity: Path = DEFAULT_COLLECTOR_IDENTITY
     publisher_identity: Path = DEFAULT_PUBLISHER_IDENTITY
     remote_user: str = DEFAULT_REMOTE_USER
-    remote_host: str = DEFAULT_REMOTE_HOST
+    remote_host: str = ""
     remote_dir: str = DEFAULT_REMOTE_DIR
     final_name: str = DEFAULT_FINAL_NAME
+    validators_file: Path | None = None
     max_drift: int = DEFAULT_MAX_DRIFT
     workers: int = DEFAULT_WORKERS
     collect_timeout: float = DEFAULT_COLLECT_TIMEOUT
@@ -112,9 +118,9 @@ def _format_command_failure(
 
 
 def ensure_identities_separate(config: PipelineConfig) -> None:
-    collector = expand_path(config.collector_identity).resolve()
+    collector_id = expand_path(config.collector_identity).resolve()
     publisher_id = expand_path(config.publisher_identity).resolve()
-    if collector == publisher_id:
+    if collector_id == publisher_id:
         raise PipelineError(
             "collector and publisher SSH identities must be different files"
         )
@@ -136,6 +142,13 @@ def run_collection(
     except publisher.PublishError as exc:
         raise PipelineError(str(exc)) from exc
 
+    if config.validators_file is None:
+        raise PipelineError(
+            "validators file required: set --validators-file or "
+            f"{collector.ENV_VALIDATORS_FILE}"
+        )
+    validators_file = expand_path(config.validators_file)
+
     local_snapshot = expand_path(config.local_snapshot)
 
     argv = [
@@ -143,6 +156,8 @@ def run_collection(
         str(script),
         "--output",
         str(local_snapshot),
+        "--validators-file",
+        str(validators_file),
         "--max-drift",
         str(config.max_drift),
         "--workers",
@@ -236,6 +251,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Local snapshot path (default: {DEFAULT_LOCAL_SNAPSHOT})",
     )
     parser.add_argument(
+        "--validators-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON validator inventory path "
+            f"(or {collector.ENV_VALIDATORS_FILE}; required)"
+        ),
+    )
+    parser.add_argument(
         "--collector-identity",
         type=Path,
         default=DEFAULT_COLLECTOR_IDENTITY,
@@ -254,8 +278,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--remote-host",
-        default=DEFAULT_REMOTE_HOST,
-        help=f"my-backend host (default: {DEFAULT_REMOTE_HOST})",
+        default=None,
+        help=(
+            "my-backend host "
+            f"(or {publisher.ENV_REMOTE_HOST}; required; no baked-in default)"
+        ),
     )
     parser.add_argument(
         "--remote-dir",
@@ -307,15 +334,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def config_from_args(args: argparse.Namespace) -> PipelineConfig:
+    try:
+        validators_file = collector.resolve_validators_file(args.validators_file)
+        remote_host = resolve_remote_host(args.remote_host)
+    except (collector.CollectorError, publisher.PublishError) as exc:
+        raise PipelineError(str(exc)) from exc
     return PipelineConfig(
         collector_script=args.collector_script,
         local_snapshot=args.local_snapshot,
         collector_identity=args.collector_identity,
         publisher_identity=args.publisher_identity,
         remote_user=args.remote_user,
-        remote_host=args.remote_host,
+        remote_host=remote_host,
         remote_dir=args.remote_dir,
         final_name=args.final_name,
+        validators_file=validators_file,
         max_drift=args.max_drift,
         workers=args.workers,
         collect_timeout=args.collect_timeout,
@@ -327,8 +360,8 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    config = config_from_args(args)
     try:
+        config = config_from_args(args)
         run_pipeline(config, runner=default_runner)
     except PipelineError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

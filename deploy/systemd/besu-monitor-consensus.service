@@ -9,6 +9,10 @@ Type=oneshot
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/besu-network-monitor
+# Host-local deployment config only (validators file path, remote host).
+# The '-' prefix makes a missing file non-fatal at unit parse time; the
+# pipeline itself still fails closed if required values are unset.
+EnvironmentFile=-/etc/besu-monitor/collector.env
 ExecStart=/usr/bin/python3 /home/ubuntu/besu-network-monitor/scripts/run_consensus_pipeline.py
 
 # Do not restart or linger as a long-running process.

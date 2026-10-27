@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_consensus_pipeline as pipe  # noqa: E402
+import snapshot_publisher as publisher  # noqa: E402
 
 
 def _completed(
@@ -54,8 +57,18 @@ class PipelineTests(unittest.TestCase):
         self.snapshot = self.root / "consensus_snapshot.json"
         self.collector_key = self.root / "besu_monitor_collector"
         self.publisher_key = self.root / "besu_monitor_publisher"
+        self.validators_file = self.root / "validators.json"
         self.collector_key.write_text("COLLECTOR_KEY_PLACEHOLDER\n")
         self.publisher_key.write_text("PUBLISHER_KEY_PLACEHOLDER\n")
+        self.validators_file.write_text(
+            json.dumps(
+                [
+                    {"alias": "validator1", "ip": "203.0.113.11"},
+                    {"alias": "validator2", "ip": "203.0.113.12"},
+                ]
+            ),
+            encoding="utf-8",
+        )
         self.config = pipe.PipelineConfig(
             collector_script=self.script,
             local_snapshot=self.snapshot,
@@ -65,6 +78,7 @@ class PipelineTests(unittest.TestCase):
             remote_host="203.0.113.10",
             remote_dir="/var/lib/besu-monitor/current",
             final_name="consensus_snapshot.json",
+            validators_file=self.validators_file,
             max_drift=2,
             workers=7,
             collect_timeout=30,
@@ -101,11 +115,14 @@ class PipelineTests(unittest.TestCase):
             if kind == "collect":
                 self.assertTrue(self._argv_has_path(argv, self.collector_key))
                 self.assertFalse(self._argv_has_path(argv, self.publisher_key))
+                self.assertIn("--validators-file", argv)
+                self.assertTrue(self._argv_has_path(argv, self.validators_file))
                 self.snapshot.write_text('{"schema_version":"1.0"}\n')
                 return _completed(0, argv=argv)
             if kind == "scp":
                 self.assertTrue(self._argv_has_path(argv, self.publisher_key))
                 self.assertFalse(self._argv_has_path(argv, self.collector_key))
+                self.assertTrue(any("203.0.113.10:" in a for a in argv))
                 self.assertTrue(any(a.endswith(".tmp") for a in argv))
                 self.assertFalse(any(a.endswith(":consensus_snapshot.json") for a in argv))
                 return _completed(0, argv=argv)
@@ -243,15 +260,119 @@ class PipelineTests(unittest.TestCase):
                     str(self.script),
                     "--local-snapshot",
                     str(self.snapshot),
+                    "--validators-file",
+                    str(self.validators_file),
                     "--collector-identity",
                     str(self.collector_key),
                     "--publisher-identity",
                     str(self.publisher_key),
+                    "--remote-host",
+                    "203.0.113.10",
                 ]
             )
         finally:
             pipe.run_pipeline = original  # type: ignore[assignment]
         self.assertEqual(code, 1)
+
+    def test_collection_passes_validators_file_to_collector(self) -> None:
+        seen: list[str] = []
+
+        def handler(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+            del timeout
+            kind = self._classify(argv)
+            if kind == "collect":
+                seen.extend(argv)
+                self.snapshot.write_text("{}\n")
+                return _completed(0, argv=argv)
+            if kind in {"scp", "rename"}:
+                return _completed(0, argv=argv)
+            self.fail(argv)
+
+        pipe.run_pipeline(self.config, runner=FakeRunner(handler))
+        self.assertIn("--validators-file", seen)
+        idx = seen.index("--validators-file")
+        self.assertEqual(
+            Path(seen[idx + 1]).resolve(),
+            self.validators_file.resolve(),
+        )
+
+    def test_missing_remote_host_fails_before_transport(self) -> None:
+        previous = os.environ.get(publisher.ENV_REMOTE_HOST)
+        try:
+            os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            with self.assertRaises(pipe.PipelineError) as ctx:
+                pipe.config_from_args(
+                    pipe.parse_args(
+                        [
+                            "--collector-script",
+                            str(self.script),
+                            "--local-snapshot",
+                            str(self.snapshot),
+                            "--validators-file",
+                            str(self.validators_file),
+                            "--collector-identity",
+                            str(self.collector_key),
+                            "--publisher-identity",
+                            str(self.publisher_key),
+                        ]
+                    )
+                )
+            self.assertIn("remote host", str(ctx.exception).lower())
+        finally:
+            if previous is None:
+                os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            else:
+                os.environ[publisher.ENV_REMOTE_HOST] = previous
+
+        calls: list[list[str]] = []
+
+        def handler(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+            del timeout
+            calls.append(list(argv))
+            return _completed(0, argv=argv)
+
+        bare = pipe.PipelineConfig(
+            collector_script=self.script,
+            local_snapshot=self.snapshot,
+            collector_identity=self.collector_key,
+            publisher_identity=self.publisher_key,
+            validators_file=self.validators_file,
+            remote_host="",
+        )
+        self.snapshot.write_text("{}\n")
+        with self.assertRaises(pipe.PipelineError) as ctx:
+            pipe.publish_snapshot(bare, self.snapshot, runner=FakeRunner(handler))
+        self.assertIn("remote host", str(ctx.exception).lower())
+        self.assertEqual(calls, [])
+
+    def test_cli_remote_host_overrides_env(self) -> None:
+        previous = os.environ.get(publisher.ENV_REMOTE_HOST)
+        try:
+            os.environ[publisher.ENV_REMOTE_HOST] = "203.0.113.99"
+            cfg = pipe.config_from_args(
+                pipe.parse_args(
+                    [
+                        "--collector-script",
+                        str(self.script),
+                        "--local-snapshot",
+                        str(self.snapshot),
+                        "--validators-file",
+                        str(self.validators_file),
+                        "--collector-identity",
+                        str(self.collector_key),
+                        "--publisher-identity",
+                        str(self.publisher_key),
+                        "--remote-host",
+                        "203.0.113.10",
+                    ]
+                )
+            )
+            self.assertEqual(cfg.remote_host, "203.0.113.10")
+        finally:
+            if previous is None:
+                os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            else:
+                os.environ[publisher.ENV_REMOTE_HOST] = previous
 
     def test_identities_remain_separate(self) -> None:
         # Same path rejected.

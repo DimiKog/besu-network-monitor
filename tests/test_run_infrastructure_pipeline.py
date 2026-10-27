@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -254,6 +255,8 @@ class InfrastructurePipelineTests(unittest.TestCase):
                     str(self.snapshot),
                     "--publisher-identity",
                     str(self.publisher_key),
+                    "--remote-host",
+                    "203.0.113.10",
                 ]
             )
         finally:
@@ -398,8 +401,6 @@ class InfrastructurePipelineTests(unittest.TestCase):
             "node_exporter",
             "instance_name",
             "up{",
-            "195.251.",
-            "83.212.",
             "validator1",
             "keycloak",
             "blackbox",
@@ -446,6 +447,93 @@ class InfrastructurePipelineTests(unittest.TestCase):
             pipe.DEFAULT_PUBLISHER_IDENTITY,
             publisher.DEFAULT_PUBLISHER_IDENTITY,
         )
+
+    def test_missing_remote_host_fails_before_transport(self) -> None:
+        previous = os.environ.get(publisher.ENV_REMOTE_HOST)
+        try:
+            os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            with self.assertRaises(pipe.PipelineError) as ctx:
+                pipe.config_from_args(
+                    pipe.parse_args(
+                        [
+                            "--collector-script",
+                            str(self.script),
+                            "--local-snapshot",
+                            str(self.snapshot),
+                            "--publisher-identity",
+                            str(self.publisher_key),
+                        ]
+                    )
+                )
+            self.assertIn("remote host", str(ctx.exception).lower())
+        finally:
+            if previous is None:
+                os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            else:
+                os.environ[publisher.ENV_REMOTE_HOST] = previous
+
+        calls: list[list[str]] = []
+
+        def handler(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+            del timeout
+            calls.append(list(argv))
+            return _completed(0, argv=argv)
+
+        bare = pipe.PipelineConfig(
+            collector_script=self.script,
+            local_snapshot=self.snapshot,
+            publisher_identity=self.publisher_key,
+            remote_host="",
+        )
+        self._write_valid_snapshot()
+        with self.assertRaises(pipe.PipelineError) as ctx:
+            pipe.publish_snapshot(bare, self.snapshot, runner=FakeRunner(handler))
+        self.assertIn("remote host", str(ctx.exception).lower())
+        self.assertEqual(calls, [])
+
+    def test_cli_remote_host_overrides_env(self) -> None:
+        previous = os.environ.get(publisher.ENV_REMOTE_HOST)
+        try:
+            os.environ[publisher.ENV_REMOTE_HOST] = "203.0.113.99"
+            cfg = pipe.config_from_args(
+                pipe.parse_args(
+                    [
+                        "--collector-script",
+                        str(self.script),
+                        "--local-snapshot",
+                        str(self.snapshot),
+                        "--publisher-identity",
+                        str(self.publisher_key),
+                        "--remote-host",
+                        "203.0.113.10",
+                    ]
+                )
+            )
+            self.assertEqual(cfg.remote_host, "203.0.113.10")
+        finally:
+            if previous is None:
+                os.environ.pop(publisher.ENV_REMOTE_HOST, None)
+            else:
+                os.environ[publisher.ENV_REMOTE_HOST] = previous
+
+    def test_configured_publisher_host_used_in_scp(self) -> None:
+        seen_scp: list[str] = []
+
+        def handler(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+            del timeout
+            kind = self._classify(argv)
+            if kind == "collect":
+                self._write_valid_snapshot()
+                return _completed(0, argv=argv)
+            if kind == "scp":
+                seen_scp.extend(argv)
+                return _completed(0, argv=argv)
+            if kind == "rename":
+                return _completed(0, argv=argv)
+            self.fail(argv)
+
+        pipe.run_pipeline(self.config, runner=FakeRunner(handler))
+        self.assertTrue(any("203.0.113.10:" in part for part in seen_scp))
 
 
 class SharedPublisherRegressionTests(unittest.TestCase):

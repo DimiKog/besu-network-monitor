@@ -54,6 +54,11 @@ reference V1 deployment). The API treats consensus and infrastructure telemetry
 as **stale after 15 minutes** (900 seconds) by default. Chain health uses live
 block age thresholds (15s / 30s by default).
 
+Deployment-specific network addresses (validator SSH targets and the publisher
+destination host) are **not** part of the repository configuration. The
+reference deployment supplies them externally (see collector configuration
+below).
+
 ---
 
 ## Public Monitor API (`api/`)
@@ -518,6 +523,24 @@ On the Prometheus VM, for validator1..validator7:
 - The public API host must never receive SSH keys or direct validator access.
 - Sanitized output must not contain IPs, aliases, Ethereum addresses, SSH usernames/paths, hostnames, raw JSON-RPC, per-validator rows, or command strings.
 
+### Collector / publisher configuration (required)
+
+Deployment-specific addresses must be supplied outside the repository. There is
+**no** baked-in validator inventory or publisher host default.
+
+| Variable / flag | Purpose |
+|---|---|
+| `BESU_MONITOR_VALIDATORS_FILE` / `--validators-file` | Path to JSON validator inventory (`[{"alias":"...","ip":"..."}, ...]`) |
+| `BESU_MONITOR_REMOTE_HOST` / `--remote-host` | Publisher destination host (API/backend SSH target) |
+
+CLI flags take precedence over the corresponding environment variables. Missing
+or empty values fail closed (non-zero exit) before SSH/SCP. Example inventory
+shape (documentation addresses only): `deploy/examples/validators.example.json`.
+
+The reference deployment loads these via systemd
+`EnvironmentFile=-/etc/besu-monitor/collector.env` on the consensus and
+infrastructure service units (host-local file; not committed).
+
 ### How to run (on the Prometheus collector VM)
 
 Collector only:
@@ -525,6 +548,7 @@ Collector only:
 ```bash
 python3 scripts/collect_consensus.py \
   --output output/consensus_snapshot.json \
+  --validators-file /path/to/validators.json \
   --max-drift 2 \
   --ssh-identity ~/.ssh/besu_monitor_collector \
   --workers 7
@@ -536,7 +560,7 @@ python3 scripts/collect_consensus.py \
 
 `scripts/run_consensus_pipeline.py` orchestrates:
 
-1. Run `collect_consensus.py` (collector identity only)
+1. Run `collect_consensus.py` (collector identity only; inventory from config)
 2. Require successful collection
 3. Atomically publish to my-backend with the **publisher** identity:
    - SCP to a temporary filename in `/var/lib/besu-monitor/current`
@@ -549,21 +573,25 @@ SSH identities on Prometheus (do **not** combine or reuse):
 | Validator collection | `~/.ssh/besu_monitor_collector` |
 | Publish to my-backend | `~/.ssh/besu_monitor_publisher` |
 
+With host env already set (or equivalent flags):
+
 ```bash
 python3 scripts/run_consensus_pipeline.py
 ```
 
-Defaults: max-drift 2, workers 7, remote `ubuntu@<my-backend>:/var/lib/besu-monitor/current/consensus_snapshot.json`.
+Other defaults: max-drift 2, workers 7, remote path
+`ubuntu@<my-backend>:/var/lib/besu-monitor/current/consensus_snapshot.json`
+(`<my-backend>` from `BESU_MONITOR_REMOTE_HOST` / `--remote-host`).
 
 **Proven manually end-to-end on Prometheus:**
 
 ```text
-7 validators -> collect_consensus.py -> output/consensus_snapshot.json
+N validators (from inventory file) -> collect_consensus.py -> output/consensus_snapshot.json
   -> run_consensus_pipeline.py -> temp upload -> atomic rename
   -> my-backend:/var/lib/besu-monitor/current/consensus_snapshot.json
 ```
 
-Manual command that succeeded on Prometheus:
+Manual command that succeeded on Prometheus (after host config is present):
 
 ```bash
 cd ~/besu-network-monitor
@@ -574,7 +602,8 @@ python3 scripts/run_consensus_pipeline.py
 
 Version-controlled unit files live under `deploy/systemd/` (install templates).
 In the reference V1 deployment the consensus timer is installed and publishes
-every 5 minutes.
+every 5 minutes. Units load `EnvironmentFile=-/etc/besu-monitor/collector.env`
+for deployment-specific settings (no addresses in the unit files themselves).
 
 | File | Role |
 |---|---|
@@ -626,6 +655,7 @@ Notes:
 - Service user: `ubuntu`
 - Working directory: `/home/ubuntu/besu-network-monitor`
 - Exec: `/usr/bin/python3 .../scripts/run_consensus_pipeline.py`
+- `EnvironmentFile=-/etc/besu-monitor/collector.env` (host-local; must define `BESU_MONITOR_VALIDATORS_FILE` and `BESU_MONITOR_REMOTE_HOST`)
 - SSH identities remain the existing files under `/home/ubuntu/.ssh/` (never embedded in the units)
 - Overlap avoidance: `Type=oneshot` + a single named service unit; systemd will not launch a second concurrent copy while one run is still active
 - `Persistent=true` on the timer catches up sensibly after reboot/downtime
@@ -804,14 +834,17 @@ python3 scripts/run_infrastructure_pipeline.py
 ```
 
 Defaults align with the consensus pipeline where possible: publisher
-`~/.ssh/besu_monitor_publisher`, remote
-`ubuntu@<my-backend>:/var/lib/besu-monitor/current/infrastructure_snapshot.json`,
-local `output/infrastructure_snapshot.json`, Prometheus `http://127.0.0.1:9090`.
+`~/.ssh/besu_monitor_publisher`, remote path under
+`/var/lib/besu-monitor/current/infrastructure_snapshot.json` on
+`<my-backend>` from `BESU_MONITOR_REMOTE_HOST` / `--remote-host`, local
+`output/infrastructure_snapshot.json`, Prometheus `http://127.0.0.1:9090`.
 
 ### Systemd automation
 
 Unit files under `deploy/systemd/` are install templates. In the reference V1
 deployment the infrastructure timer is installed and publishes every 5 minutes.
+Units load the same host-local `EnvironmentFile=-/etc/besu-monitor/collector.env`
+(at minimum `BESU_MONITOR_REMOTE_HOST`).
 
 | File | Role |
 |---|---|
@@ -848,6 +881,6 @@ Fixtures in `input/` remain private copies of operational reports.
 
 ## Security note
 
-Always review sanitized JSON before public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces.
+Always review sanitized JSON before public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces. Deployment-specific validator and publisher network addresses must stay on the trusted collector host only (environment / inventory file), never in the repository.
 
 **Post-release hardening (after V1.0.0):** The dedicated SSH identities used by the trusted collector/publisher have been further restricted. Access for those identities is limited to the trusted collector source host, and unnecessary SSH capabilities (including forwarding, PTY, agent forwarding, and X11 forwarding) are disabled via `authorized_keys` restrictions.

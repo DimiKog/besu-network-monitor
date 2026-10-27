@@ -41,16 +41,10 @@ DEFAULT_SSH_CONNECT_TIMEOUT = 10
 DEFAULT_COMMAND_TIMEOUT = 20
 DEFAULT_WORKERS = 7
 
-# Internal collector inventory. IPs/aliases must never appear in sanitized output.
-VALIDATORS: tuple[dict[str, Any], ...] = (
-    {"alias": "validator1", "ip": "195.251.92.253"},
-    {"alias": "validator2", "ip": "195.251.92.233"},
-    {"alias": "validator3", "ip": "195.251.92.163"},
-    {"alias": "validator4", "ip": "83.212.77.14"},
-    {"alias": "validator5", "ip": "83.212.77.31"},
-    {"alias": "validator6", "ip": "83.212.77.13"},
-    {"alias": "validator7", "ip": "83.212.80.117"},
-)
+# Deployment-specific validator inventory is never hardcoded. Supply via
+# --validators-file or BESU_MONITOR_VALIDATORS_FILE (JSON array of
+# {"alias": "...", "ip": "..."}). Aliases/IPs must never appear in sanitized output.
+ENV_VALIDATORS_FILE = "BESU_MONITOR_VALIDATORS_FILE"
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
@@ -70,6 +64,84 @@ class SshSettings:
     rpc_url: str = DEFAULT_RPC_URL
     connect_timeout: int = DEFAULT_SSH_CONNECT_TIMEOUT
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
+
+
+# ============================================================
+# VALIDATOR INVENTORY (external configuration only)
+# ============================================================
+
+
+def resolve_validators_file(cli_value: Path | str | None = None) -> Path:
+    """Resolve inventory path. CLI wins over env; no baked-in default."""
+    if cli_value is not None:
+        text = str(cli_value).strip()
+        if not text:
+            raise CollectorError(
+                "validators file is empty: set --validators-file or "
+                f"{ENV_VALIDATORS_FILE}"
+            )
+        return Path(text)
+    env = os.environ.get(ENV_VALIDATORS_FILE, "")
+    text = str(env).strip() if env is not None else ""
+    if not text:
+        raise CollectorError(
+            "validators file required: set --validators-file or "
+            f"{ENV_VALIDATORS_FILE}"
+        )
+    return Path(text)
+
+
+def load_validators_inventory(path: Path) -> tuple[dict[str, str], ...]:
+    """Load and strictly validate a JSON validator inventory file."""
+    resolved = path.expanduser()
+    if not resolved.is_file():
+        raise CollectorError(f"validators file not found: {resolved}")
+    try:
+        raw = resolved.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CollectorError(
+            f"validators file is not valid JSON: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise CollectorError(
+            f"unable to read validators file: {exc}"
+        ) from exc
+
+    if not isinstance(data, list):
+        raise CollectorError("validators file must contain a JSON array")
+    if len(data) == 0:
+        raise CollectorError("validators inventory is empty")
+
+    seen_aliases: set[str] = set()
+    inventory: list[dict[str, str]] = []
+    for index, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise CollectorError(
+                f"validators[{index}] must be a JSON object"
+            )
+        if "alias" not in entry or "ip" not in entry:
+            raise CollectorError(
+                f"validators[{index}] must include non-empty alias and ip"
+            )
+        alias_raw = entry["alias"]
+        ip_raw = entry["ip"]
+        if not isinstance(alias_raw, str) or not alias_raw.strip():
+            raise CollectorError(
+                f"validators[{index}].alias must be a non-empty string"
+            )
+        if not isinstance(ip_raw, str) or not ip_raw.strip():
+            raise CollectorError(
+                f"validators[{index}].ip must be a non-empty string"
+            )
+        alias = alias_raw.strip()
+        ip = ip_raw.strip()
+        if alias in seen_aliases:
+            raise CollectorError(f"duplicate validator alias: {alias}")
+        seen_aliases.add(alias)
+        inventory.append({"alias": alias, "ip": ip})
+
+    return tuple(inventory)
 
 
 # ============================================================
@@ -563,12 +635,18 @@ def run_collection(
     *,
     transport: RpcTransport,
     connectivity_probe: Callable[[str, str, int], tuple[bool, str]] | None,
+    validators: Sequence[Mapping[str, Any]],
     max_drift_blocks: int = DEFAULT_MAX_DRIFT_BLOCKS,
     timeout: int = DEFAULT_COMMAND_TIMEOUT,
     workers: int = DEFAULT_WORKERS,
-    validators: Sequence[Mapping[str, Any]] = VALIDATORS,
 ) -> dict[str, Any]:
-    """Run full collection and return the sanitized public snapshot."""
+    """Run full collection and return the sanitized public snapshot.
+
+    ``validators`` must be supplied explicitly (from a configured inventory
+    file in production, or a test fixture). There is no baked-in default.
+    """
+    if not validators:
+        raise CollectorError("validators inventory is empty")
     results = collect_validator_blocks(
         validators,
         transport,
@@ -652,6 +730,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Output path (default: {DEFAULT_OUTPUT})",
     )
     parser.add_argument(
+        "--validators-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON validator inventory path "
+            f"(or {ENV_VALIDATORS_FILE}; required; no baked-in default)"
+        ),
+    )
+    parser.add_argument(
         "--max-drift",
         type=int,
         default=DEFAULT_MAX_DRIFT_BLOCKS,
@@ -713,6 +800,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         command_timeout=args.timeout,
     )
 
+    try:
+        validators_path = resolve_validators_file(args.validators_file)
+        validators = load_validators_inventory(validators_path)
+    except CollectorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     identity = settings.identity.expanduser()
     if not identity.is_file():
         print(
@@ -730,7 +824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     connectivity_probe = None if args.skip_connectivity_probe else probe
 
     print(
-        f"collect_consensus.py — checking {len(VALIDATORS)} validator(s) "
+        f"collect_consensus.py — checking {len(validators)} validator(s) "
         f"with {args.workers} workers; max drift={args.max_drift}",
         flush=True,
     )
@@ -739,6 +833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         snapshot = run_collection(
             transport=transport,
             connectivity_probe=connectivity_probe,
+            validators=validators,
             max_drift_blocks=args.max_drift,
             timeout=args.timeout,
             workers=args.workers,

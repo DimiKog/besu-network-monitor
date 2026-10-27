@@ -1,0 +1,9 @@
+[
+  {"alias": "validator1", "ip": "203.0.113.11"},
+  {"alias": "validator2", "ip": "203.0.113.12"},
+  {"alias": "validator3", "ip": "203.0.113.13"},
+  {"alias": "validator4", "ip": "203.0.113.14"},
+  {"alias": "validator5", "ip": "203.0.113.15"},
+  {"alias": "validator6", "ip": "203.0.113.16"},
+  {"alias": "validator7", "ip": "203.0.113.17"}
+]

@@ -23,11 +23,14 @@ from typing import Protocol, Sequence
 
 DEFAULT_PUBLISHER_IDENTITY = Path.home() / ".ssh" / "besu_monitor_publisher"
 DEFAULT_REMOTE_USER = "ubuntu"
-DEFAULT_REMOTE_HOST = "83.212.75.184"
 DEFAULT_REMOTE_DIR = "/var/lib/besu-monitor/current"
 DEFAULT_SCP_TIMEOUT = 60
 DEFAULT_SSH_TIMEOUT = 30
 DEFAULT_CONNECT_TIMEOUT = 10
+
+# Deployment-specific publisher destination is never hardcoded. Supply via
+# --remote-host or BESU_MONITOR_REMOTE_HOST.
+ENV_REMOTE_HOST = "BESU_MONITOR_REMOTE_HOST"
 
 
 class PublishError(Exception):
@@ -50,7 +53,7 @@ class PublishConfig:
 
     publisher_identity: Path = DEFAULT_PUBLISHER_IDENTITY
     remote_user: str = DEFAULT_REMOTE_USER
-    remote_host: str = DEFAULT_REMOTE_HOST
+    remote_host: str = ""
     remote_dir: str = DEFAULT_REMOTE_DIR
     final_name: str = "snapshot.json"
     scp_timeout: float = DEFAULT_SCP_TIMEOUT
@@ -62,8 +65,43 @@ def expand_path(path: Path) -> Path:
     return path.expanduser()
 
 
+def resolve_remote_host(cli_value: str | None = None) -> str:
+    """Resolve publisher host. CLI wins over env; no production default.
+
+    Raises PublishError when missing or empty after CLI precedence is applied.
+    """
+    if cli_value is not None:
+        host = str(cli_value).strip()
+        if not host:
+            raise PublishError(
+                "remote host is empty: set --remote-host or "
+                f"{ENV_REMOTE_HOST}"
+            )
+        return host
+    env = os.environ.get(ENV_REMOTE_HOST, "")
+    host = str(env).strip() if env is not None else ""
+    if not host:
+        raise PublishError(
+            "remote host required: set --remote-host or "
+            f"{ENV_REMOTE_HOST}"
+        )
+    return host
+
+
+def require_remote_host(host: str) -> str:
+    """Fail fast if a PublishConfig host is missing/blank before SCP/SSH."""
+    cleaned = str(host).strip() if host is not None else ""
+    if not cleaned:
+        raise PublishError(
+            "remote host required: set --remote-host or "
+            f"{ENV_REMOTE_HOST}"
+        )
+    return cleaned
+
+
 def remote_target(config: PublishConfig) -> str:
-    return f"{config.remote_user}@{config.remote_host}"
+    host = require_remote_host(config.remote_host)
+    return f"{config.remote_user}@{host}"
 
 
 def remote_final_path(config: PublishConfig) -> str:
@@ -183,6 +221,7 @@ def publish_snapshot(
     runner: CommandRunner = default_runner,
 ) -> None:
     """Atomically publish local snapshot via SCP temp + remote rename."""
+    require_remote_host(config.remote_host)
     publisher_identity = ensure_identity_exists(
         config.publisher_identity, "publisher"
     )

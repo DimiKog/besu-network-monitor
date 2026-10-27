@@ -99,8 +99,6 @@ def _set_named_up(
 # Source identities / labels / IPs must not appear. Public field names such as
 # faucet_up / identity_up / backend_up are part of the sanitized contract.
 SENSITIVE_NEEDLES = (
-    "195.251.",
-    "83.212.",
     "127.0.0.1",
     "localhost",
     "besu_validators_nginx",

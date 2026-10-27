@@ -12,6 +12,9 @@ Sequence:
 Publishing reuses scripts/snapshot_publisher.py (same mechanism as consensus).
 Stdlib only. No shell=True. Scheduling is intentionally not implemented.
 Never publishes raw Prometheus data.
+
+Deployment-specific publisher host is not hardcoded: supply
+BESU_MONITOR_REMOTE_HOST / --remote-host (CLI wins over env).
 """
 
 from __future__ import annotations
@@ -33,7 +36,6 @@ DEFAULT_LOCAL_SNAPSHOT = BASE_DIR / "output" / "infrastructure_snapshot.json"
 
 DEFAULT_PUBLISHER_IDENTITY = publisher.DEFAULT_PUBLISHER_IDENTITY
 DEFAULT_REMOTE_USER = publisher.DEFAULT_REMOTE_USER
-DEFAULT_REMOTE_HOST = publisher.DEFAULT_REMOTE_HOST
 DEFAULT_REMOTE_DIR = publisher.DEFAULT_REMOTE_DIR
 DEFAULT_FINAL_NAME = "infrastructure_snapshot.json"
 
@@ -47,6 +49,7 @@ DEFAULT_CONNECT_TIMEOUT = publisher.DEFAULT_CONNECT_TIMEOUT
 CommandRunner = publisher.CommandRunner
 expand_path = publisher.expand_path
 default_runner = publisher.default_runner
+resolve_remote_host = publisher.resolve_remote_host
 
 
 class PipelineError(Exception):
@@ -59,7 +62,7 @@ class PipelineConfig:
     local_snapshot: Path = DEFAULT_LOCAL_SNAPSHOT
     publisher_identity: Path = DEFAULT_PUBLISHER_IDENTITY
     remote_user: str = DEFAULT_REMOTE_USER
-    remote_host: str = DEFAULT_REMOTE_HOST
+    remote_host: str = ""
     remote_dir: str = DEFAULT_REMOTE_DIR
     final_name: str = DEFAULT_FINAL_NAME
     prometheus_url: str = DEFAULT_PROMETHEUS_URL
@@ -274,8 +277,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--remote-host",
-        default=DEFAULT_REMOTE_HOST,
-        help=f"my-backend host (default: {DEFAULT_REMOTE_HOST})",
+        default=None,
+        help=(
+            "my-backend host "
+            f"(or {publisher.ENV_REMOTE_HOST}; required; no baked-in default)"
+        ),
     )
     parser.add_argument(
         "--remote-dir",
@@ -321,12 +327,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def config_from_args(args: argparse.Namespace) -> PipelineConfig:
+    try:
+        remote_host = resolve_remote_host(args.remote_host)
+    except publisher.PublishError as exc:
+        raise PipelineError(str(exc)) from exc
     return PipelineConfig(
         collector_script=args.collector_script,
         local_snapshot=args.local_snapshot,
         publisher_identity=args.publisher_identity,
         remote_user=args.remote_user,
-        remote_host=args.remote_host,
+        remote_host=remote_host,
         remote_dir=args.remote_dir,
         final_name=args.final_name,
         prometheus_url=args.prometheus_url,
@@ -340,8 +350,8 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    config = config_from_args(args)
     try:
+        config = config_from_args(args)
         run_pipeline(config, runner=default_runner)
     except PipelineError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

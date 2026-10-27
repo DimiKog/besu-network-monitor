@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -229,8 +230,7 @@ class ConsensusSemanticsTests(unittest.TestCase):
     def _assert_public_safe(self, snap: dict) -> None:
         text = json.dumps(snap)
         forbidden_substrings = [
-            "195.251.",
-            "83.212.",
+            "10.0.0.",
             "ubuntu",
             "besu_monitor_collector",
             "127.0.0.1",
@@ -246,8 +246,136 @@ class ConsensusSemanticsTests(unittest.TestCase):
         self.assertIn("drift", snap)
 
 
+def _example_validators(count: int = 7) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {"alias": f"validator{i}", "ip": f"203.0.113.{10 + i}"}
+        for i in range(1, count + 1)
+    )
+
+
+class ValidatorsInventoryTests(unittest.TestCase):
+    def test_load_valid_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "validators.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"alias": "validator1", "ip": "203.0.113.11"},
+                        {"alias": "validator2", "ip": "203.0.113.12"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            inventory = cc.load_validators_inventory(path)
+            self.assertEqual(len(inventory), 2)
+            self.assertEqual(inventory[0]["alias"], "validator1")
+            self.assertEqual(inventory[1]["ip"], "203.0.113.12")
+
+    def test_missing_inventory_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.json"
+            with self.assertRaises(cc.CollectorError) as ctx:
+                cc.load_validators_inventory(path)
+            self.assertIn("not found", str(ctx.exception))
+
+    def test_malformed_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.json"
+            path.write_text("{not-json", encoding="utf-8")
+            with self.assertRaises(cc.CollectorError) as ctx:
+                cc.load_validators_inventory(path)
+            self.assertIn("not valid JSON", str(ctx.exception))
+
+    def test_empty_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaises(cc.CollectorError) as ctx:
+                cc.load_validators_inventory(path)
+            self.assertIn("empty", str(ctx.exception))
+
+    def test_malformed_entries(self) -> None:
+        cases = [
+            '[{"alias": "validator1"}]',
+            '[{"ip": "203.0.113.11"}]',
+            '[{"alias": "", "ip": "203.0.113.11"}]',
+            '[{"alias": "validator1", "ip": ""}]',
+            '[{"alias": 1, "ip": "203.0.113.11"}]',
+            '["validator1"]',
+            '{"alias": "validator1", "ip": "203.0.113.11"}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, payload in enumerate(cases):
+                path = Path(tmp) / f"bad_{index}.json"
+                path.write_text(payload, encoding="utf-8")
+                with self.assertRaises(cc.CollectorError):
+                    cc.load_validators_inventory(path)
+
+    def test_duplicate_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dup.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"alias": "validator1", "ip": "203.0.113.11"},
+                        {"alias": "validator1", "ip": "203.0.113.12"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(cc.CollectorError) as ctx:
+                cc.load_validators_inventory(path)
+            self.assertIn("duplicate", str(ctx.exception).lower())
+
+    def test_cli_overrides_env_for_validators_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_path = Path(tmp) / "cli.json"
+            env_path = Path(tmp) / "env.json"
+            cli_path.write_text("[]", encoding="utf-8")
+            env_path.write_text("[]", encoding="utf-8")
+            previous = os.environ.get(cc.ENV_VALIDATORS_FILE)
+            try:
+                os.environ[cc.ENV_VALIDATORS_FILE] = str(env_path)
+                resolved = cc.resolve_validators_file(cli_path)
+                self.assertEqual(resolved, cli_path)
+            finally:
+                if previous is None:
+                    os.environ.pop(cc.ENV_VALIDATORS_FILE, None)
+                else:
+                    os.environ[cc.ENV_VALIDATORS_FILE] = previous
+
+    def test_env_used_when_cli_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "env.json"
+            env_path.write_text("[]", encoding="utf-8")
+            previous = os.environ.get(cc.ENV_VALIDATORS_FILE)
+            try:
+                os.environ[cc.ENV_VALIDATORS_FILE] = str(env_path)
+                resolved = cc.resolve_validators_file(None)
+                self.assertEqual(resolved, env_path)
+            finally:
+                if previous is None:
+                    os.environ.pop(cc.ENV_VALIDATORS_FILE, None)
+                else:
+                    os.environ[cc.ENV_VALIDATORS_FILE] = previous
+
+    def test_missing_validators_config_fails(self) -> None:
+        previous = os.environ.get(cc.ENV_VALIDATORS_FILE)
+        try:
+            os.environ.pop(cc.ENV_VALIDATORS_FILE, None)
+            with self.assertRaises(cc.CollectorError) as ctx:
+                cc.resolve_validators_file(None)
+            self.assertIn("required", str(ctx.exception))
+        finally:
+            if previous is None:
+                os.environ.pop(cc.ENV_VALIDATORS_FILE, None)
+            else:
+                os.environ[cc.ENV_VALIDATORS_FILE] = previous
+
+
 class TransportCollectionTests(unittest.TestCase):
     def test_run_collection_with_fake_transport(self) -> None:
+        validators = _example_validators(7)
         blocks = {
             "validator1": 50,
             "validator2": 50,
@@ -278,6 +406,7 @@ class TransportCollectionTests(unittest.TestCase):
         snap = cc.run_collection(
             transport=transport,
             connectivity_probe=probe,
+            validators=validators,
             max_drift_blocks=2,
             timeout=5,
             workers=4,
@@ -306,6 +435,7 @@ class TransportCollectionTests(unittest.TestCase):
             cc.run_collection(
                 transport=transport,
                 connectivity_probe=probe,
+                validators=_example_validators(3),
                 max_drift_blocks=2,
                 workers=4,
             )
