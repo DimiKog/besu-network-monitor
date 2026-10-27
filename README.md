@@ -881,6 +881,14 @@ Fixtures in `input/` remain private copies of operational reports.
 
 ## Security note
 
-Always review sanitized JSON before public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces. Deployment-specific validator and publisher network addresses must stay on the trusted collector host only (environment / inventory file), never in the repository.
+Always review sanitized JSON before public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces.
 
-**Post-release hardening (after V1.0.0):** The dedicated SSH identities used by the trusted collector/publisher have been further restricted. Access for those identities is limited to the trusted collector source host, and unnecessary SSH capabilities (including forwarding, PTY, agent forwarding, and X11 forwarding) are disabled via `authorized_keys` restrictions.
+Deployment-specific validator and publisher network addresses are externalized from the application source and must remain on the trusted collector host only. The reference deployment loads the validator inventory and publisher destination from host-local configuration under `/etc/besu-monitor/`; no production network addresses are required in the current source tree.
+
+**Post-release hardening (after V1.0.0):**
+
+- Production validator and publisher addresses were removed from the current source configuration and moved to host-local deployment configuration. The historical V1.0.0 source may contain deployment-specific network addresses; these are operational topology information, not credentials or authentication secrets. Git history and the V1.0.0 tag were intentionally left unchanged.
+- The public Monitor API is protected by nginx per-client rate limiting. The reference deployment uses `10r/s` with `burst=20`; requests exceeding the limit receive HTTP `429 Too Many Requests`. The limit is scoped to the Monitor API virtual host and does not apply to other services on the deployment host.
+- The dedicated SSH identities used by the trusted collector/publisher are restricted to the trusted collector source host, with unnecessary SSH capabilities (including forwarding, PTY, agent forwarding, and X11 forwarding) disabled through `authorized_keys` restrictions.
+
+**Residual SSH risk:** the collector identity is not currently constrained by a forced-command allowlist. The source-host restriction and SSH capability restrictions reduce the attack surface, but compromise of both the collector host and its private key could still permit non-interactive commands as the configured remote user. A narrowly scoped forced-command wrapper remains a possible future hardening measure; it is not claimed as part of V1.
