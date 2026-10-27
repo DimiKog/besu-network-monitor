@@ -1,10 +1,14 @@
 # Besu Network Monitor
 
-Public, read-only Hyperledger Besu/QBFT Network Monitor.
+Public, read-only Hyperledger Besu/QBFT Network Monitor (**V1.0.0**).
 
-The trusted collector/publisher pipeline is operational. This repository now also
-contains production Monitor API components: service health, consensus (snapshot),
-and live chain (public JSON-RPC). A static frontend lives under `frontend/`.
+Production dashboard: `https://monitor.dimikog.org`
+Production API: `https://api.monitor.dimikog.org`
+
+The trusted collector/publisher pipeline is operational. The Monitor API provides
+service health, overview, consensus (snapshot), infrastructure (snapshot), and
+live chain (public JSON-RPC). A static Next.js frontend under `frontend/` is
+deployed via GitHub Actions to GitHub Pages.
 
 ## Architecture
 
@@ -44,10 +48,11 @@ API from the public RPC only (default Edu-Net: `https://rpc.dimikog.org/rpc/`).
 Raw internal reports, validator RPC, SSH, Prometheus credentials/labels, and
 `qbft_*` methods must never be exposed publicly.
 
-Intended cadence: consensus and infrastructure pipelines every **5 minutes** via
-systemd timers (templates under `deploy/systemd/`). The API treats consensus and
-infrastructure telemetry as **stale after 15 minutes** (900 seconds) by default.
-Chain health uses live block age thresholds (15s / 30s by default).
+Cadence: consensus and infrastructure pipelines every **5 minutes** via systemd
+timers (unit files under `deploy/systemd/`; installed and enabled in the
+reference V1 deployment). The API treats consensus and infrastructure telemetry
+as **stale after 15 minutes** (900 seconds) by default. Chain health uses live
+block age thresholds (15s / 30s by default).
 
 ---
 
@@ -448,7 +453,7 @@ Validated production layout on `my-backend`:
 |---|---|
 | Project directory | `/home/ubuntu/besu-network-monitor` |
 | Virtualenv Python | `/home/ubuntu/besu-network-monitor/.venv/bin/python` |
-| Bind | `127.0.0.1:8040` (localhost only; nginx/TLS next) |
+| Bind | `127.0.0.1:8040` (localhost only; nginx provides public HTTPS) |
 | Snapshots | `/var/lib/besu-monitor/current/{consensus,infrastructure}_snapshot.json` |
 
 Application built-in defaults already match those snapshot paths, expected chain
@@ -484,7 +489,7 @@ Notes:
 
 - `Type=simple` long-running Uvicorn; `Restart=on-failure` with `RestartSec=5s`
 - Does **not** conflict with Prometheus-side collector/publisher units
-- Does **not** bind `0.0.0.0`; public exposure is deferred to nginx/DNS/TLS
+- Does **not** bind `0.0.0.0`; public HTTPS is provided by nginx (DNS/TLS configured)
 - Do **not** place collector SSH material on this host
 
 ---
@@ -548,7 +553,7 @@ SSH identities on Prometheus (do **not** combine or reuse):
 python3 scripts/run_consensus_pipeline.py
 ```
 
-Defaults: max-drift 2, workers 7, remote `ubuntu@83.212.75.184:/var/lib/besu-monitor/current/consensus_snapshot.json`.
+Defaults: max-drift 2, workers 7, remote `ubuntu@<my-backend>:/var/lib/besu-monitor/current/consensus_snapshot.json`.
 
 **Proven manually end-to-end on Prometheus:**
 
@@ -565,9 +570,11 @@ cd ~/besu-network-monitor
 python3 scripts/run_consensus_pipeline.py
 ```
 
-### Systemd automation (templates only)
+### Systemd automation
 
-Version-controlled unit files live under `deploy/systemd/`:
+Version-controlled unit files live under `deploy/systemd/` (install templates).
+In the reference V1 deployment the consensus timer is installed and publishes
+every 5 minutes.
 
 | File | Role |
 |---|---|
@@ -675,7 +682,7 @@ snapshot. Prometheus is the authoritative source for this collector.
 - Collector: **no SSH** (local Prometheus HTTP only)
 - Publisher: dedicated `~/.ssh/besu_monitor_publisher` (same key as consensus)
 - **No database**
-- **No FastAPI infrastructure endpoint yet** (API integration is the next phase)
+- Public API exposes infrastructure via `GET /api/v1/infrastructure` (snapshot only)
 - Does **not** determine QBFT quorum (that remains the consensus collector)
 - Raw Prometheus data is **never** published — only the sanitized snapshot
 
@@ -801,15 +808,17 @@ Defaults align with the consensus pipeline where possible: publisher
 `ubuntu@<my-backend>:/var/lib/besu-monitor/current/infrastructure_snapshot.json`,
 local `output/infrastructure_snapshot.json`, Prometheus `http://127.0.0.1:9090`.
 
-### Systemd automation (templates only)
+### Systemd automation
+
+Unit files under `deploy/systemd/` are install templates. In the reference V1
+deployment the infrastructure timer is installed and publishes every 5 minutes.
 
 | File | Role |
 |---|---|
 | `besu-monitor-infrastructure.service` | Oneshot: run the infrastructure pipeline once |
 | `besu-monitor-infrastructure.timer` | Trigger that service every 5 minutes |
 
-Do **not** install/enable these units until the first live pipeline publish has
-been validated manually on Prometheus. Install steps mirror consensus
+Install steps mirror consensus
 (`deploy/systemd/besu-monitor-infrastructure.{service,timer}`).
 
 ### Infrastructure collector / pipeline tests (no live Prometheus / SSH)
@@ -832,12 +841,13 @@ python3 scripts/build_snapshot.py
 
 Fixtures in `input/` remain private copies of operational reports.
 
-## Intentionally excluded / not implemented yet
+## Out of scope for V1 / not implemented
 
-- Installing/enabling systemd units from this Mac/Cursor session (templates are in-repo; install manually on the target VMs)
-- nginx / DNS / TLS fronting the API on `my-backend` (next phase)
-- Frontend, Docker, database, caching/history, alerts, Blockscout
+- Installing/enabling systemd units from this Mac/Cursor session (unit files are in-repo; the reference deployment installs and enables them manually on the target VMs)
+- Docker, database, caching/history, alerts, Blockscout, write operations, validator management
 
 ## Security note
 
-Always review sanitized JSON before any future public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces.
+Always review sanitized JSON before public exposure. Never publish `input/` fixtures or collector SSH material. The public API must never expose IPs, hostnames, validator addresses, SSH details, filesystem paths, raw collector exceptions, raw JSON-RPC, or stack traces.
+
+**Post-release hardening (after V1.0.0):** The dedicated SSH identities used by the trusted collector/publisher have been further restricted. Access for those identities is limited to the trusted collector source host, and unnecessary SSH capabilities (including forwarding, PTY, agent forwarding, and X11 forwarding) are disabled via `authorized_keys` restrictions.
