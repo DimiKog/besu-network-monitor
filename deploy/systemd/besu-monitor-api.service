@@ -1,0 +1,49 @@
+[Unit]
+Description=Besu Network Monitor API (FastAPI / Uvicorn)
+Documentation=file:///home/ubuntu/besu-network-monitor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/besu-network-monitor
+
+# Dedicated project venv only. Do not use system Python, PATH uvicorn,
+# shell activation, --reload, or multiple workers (V1).
+ExecStart=/home/ubuntu/besu-network-monitor/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8040
+
+# Restart on unexpected failure; do not restart after a clean stop.
+Restart=on-failure
+RestartSec=5s
+
+# Journal logging for operational diagnosis.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=besu-monitor-api
+
+# Application configuration uses built-in production defaults
+# (consensus/infrastructure snapshot paths under /var/lib/besu-monitor/current,
+# expected chain ID 424242, public RPC URL). No secrets and no extra
+# Environment= overrides are required for the validated V1 deployment.
+
+# Mild hardening consistent with Besu Monitor collector units, plus API-specific
+# read-only home and snapshot paths. The process must still:
+#   - read /var/lib/besu-monitor/current/*.json
+#   - make outbound HTTP/HTTPS to the configured public Besu JSON-RPC endpoint
+# It must not receive SSH keys, collector credentials, or snapshot write access.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/var/lib/besu-monitor
+
+[Install]
+WantedBy=multi-user.target

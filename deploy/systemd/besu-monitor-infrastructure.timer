@@ -1,0 +1,19 @@
+[Unit]
+Description=Run Besu Monitor infrastructure pipeline every 5 minutes
+Documentation=file:///home/ubuntu/besu-network-monitor/README.md
+Requires=besu-monitor-infrastructure.service
+
+[Timer]
+# First run shortly after boot / timer activation, then every 5 minutes
+# after the service last became active.
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+
+# Bind explicitly to the oneshot service unit. systemd will not start a
+# second concurrent copy while that service unit is already running.
+Unit=besu-monitor-infrastructure.service
+
+[Install]
+WantedBy=timers.target

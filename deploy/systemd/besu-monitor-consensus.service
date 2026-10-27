@@ -1,0 +1,37 @@
+[Unit]
+Description=Besu Monitor consensus collect and publish pipeline
+Documentation=file:///home/ubuntu/besu-network-monitor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/besu-network-monitor
+ExecStart=/usr/bin/python3 /home/ubuntu/besu-network-monitor/scripts/run_consensus_pipeline.py
+
+# Do not restart or linger as a long-running process.
+Restart=no
+RemainAfterExit=no
+
+# Journal logging for operational diagnosis.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=besu-monitor-consensus
+
+# Mild hardening only. Deliberately avoids ProtectHome / ProtectSystem=strict
+# so the job can read ~/.ssh identities, write output/consensus_snapshot.json,
+# and make outbound SSH/SCP to validators and my-backend.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
